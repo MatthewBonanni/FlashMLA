@@ -20,6 +20,9 @@ struct Flash_fwd_mla_params {
     void *__restrict__ o_ptr;
     void *__restrict__ softmax_lse_ptr;
 
+    float *__restrict__ descale_q_ptr;
+    float *__restrict__ descale_k_ptr;
+
     index_t q_batch_stride;
     index_t k_batch_stride;
     index_t o_batch_stride;

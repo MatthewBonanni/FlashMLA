@@ -617,14 +617,15 @@ __forceinline__ __device__ void store_o(
     int idx_in_warpgroup
 ) {
     using InputT = typename T::InputT;
+    using OutputT = typename T::OutputT;
     if constexpr (IS_NO_SPLIT) {
         // Should convert the output to bfloat16 / float16, and save it to O
-        Tensor sOutputBuf = make_tensor(make_smem_ptr((InputT*)sO_addr), tile_to_shape(
-            GMMA::Layout_K_SW128_Atom<InputT>{},
+        Tensor sOutputBuf = make_tensor(make_smem_ptr((OutputT*)sO_addr), tile_to_shape(
+            GMMA::Layout_K_SW128_Atom<OutputT>{},
             Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_V>>{}
         ));
 
-        Tensor rOb = make_tensor_like<InputT>(rO);
+        Tensor rOb = make_tensor_like<OutputT>(rO);
         CUTLASS_PRAGMA_UNROLL
         for (int idx = 0; idx < size(rO); ++idx) {
             rOb(idx) = (InputT)(rO(idx) / rL[idx%4 >= 2]);
@@ -632,7 +633,7 @@ __forceinline__ __device__ void store_o(
 
         Tensor sMyOutputBuf = local_tile(sOutputBuf, Shape<_64, _256>{}, make_coord(_0{}, warpgroup_idx));
         TiledCopy r2s_tiled_copy = make_tiled_copy_C(
-            Copy_Atom<SM90_U32x4_STSM_N, InputT>{},
+            Copy_Atom<SM90_U32x4_STSM_N, OutputT>{},
             (typename T::TiledMMA_PV_LocalP){}
         );
         ThrCopy r2s_thr_copy = r2s_tiled_copy.get_slice(idx_in_warpgroup);
@@ -1079,7 +1080,8 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
 
         // Define global tensors
         using InputT = typename T::InputT;
-        InputT* o_ptr = (InputT*)params.o_ptr + batch_idx*params.o_batch_stride + m_block_idx*T::BLOCK_SIZE_M*params.o_row_stride + k_head_idx*params.o_head_stride;	// (BLOCK_SIZE_M, HEAD_DIM_V) : (params.o_row_stride, 1)
+        using OutputT = typename T::OutputT;
+        OutputT* o_ptr = (OutputT*)params.o_ptr + batch_idx*params.o_batch_stride + m_block_idx*T::BLOCK_SIZE_M*params.o_row_stride + k_head_idx*params.o_head_stride;	// (BLOCK_SIZE_M, HEAD_DIM_V) : (params.o_row_stride, 1)
         float* softmax_lse_ptr = (float*)params.softmax_lse_ptr + (batch_idx*params.h_k + k_head_idx)*params.q_seq_per_hk + m_block_idx*T::BLOCK_SIZE_M;	// (BLOCK_SIZE_M) : (1)
         int* block_table_ptr = params.block_table + batch_idx*params.block_table_batch_stride;	// (/) : (1)
         
@@ -1278,9 +1280,9 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
 }
 
 
-template<typename InputT>
+template<typename InputT, typename OutputT>
 void run_flash_splitkv_mla_kernel(Flash_fwd_mla_params &params, cudaStream_t stream) {
-    using T = Traits<InputT>;
+    using T = Traits<InputT, OutputT>;
     auto shape_Q = make_shape(params.q_seq_per_hk, params.d, params.h_k, params.b);
     auto tma_Q = cute::make_tma_copy(
         SM90_TMA_LOAD{},
@@ -1318,14 +1320,14 @@ void run_flash_splitkv_mla_kernel(Flash_fwd_mla_params &params, cudaStream_t str
     auto tma_O = cute::make_tma_copy(
         SM90_TMA_STORE{},
         make_tensor(
-            make_gmem_ptr((InputT*)params.o_ptr),
+            make_gmem_ptr((OutputT*)params.o_ptr),
             make_layout(
                 shape_O,
                 make_stride(params.o_row_stride, _1{}, params.o_head_stride, params.o_batch_stride)
             )
         ),
         tile_to_shape(
-            GMMA::Layout_K_SW128_Atom<InputT>{},
+            GMMA::Layout_K_SW128_Atom<OutputT>{},
             Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_V>>{}
         )
     );
@@ -1355,8 +1357,12 @@ void run_flash_splitkv_mla_kernel(Flash_fwd_mla_params &params, cudaStream_t str
     CHECK_CUDA_KERNEL_LAUNCH();
 }
 
-template void run_flash_splitkv_mla_kernel<cutlass::bfloat16_t>(Flash_fwd_mla_params &params, cudaStream_t stream);
+template void run_flash_splitkv_mla_kernel<cutlass::bfloat16_t, cutlass::bfloat16_t>(Flash_fwd_mla_params &params, cudaStream_t stream);
 
 #ifndef FLASH_MLA_DISABLE_FP16
-template void run_flash_splitkv_mla_kernel<cutlass::half_t>(Flash_fwd_mla_params &params, cudaStream_t stream);
+template void run_flash_splitkv_mla_kernel<cutlass::half_t, cutlass::half_t>(Flash_fwd_mla_params &params, cudaStream_t stream);
+#endif
+
+#ifndef FLASH_MLA_DISABLE_FP8
+template void run_flash_splitkv_mla_kernel<cutlass::float_e4m3_t, cutlass::bfloat16_t>(Flash_fwd_mla_params &params, cudaStream_t stream);
 #endif

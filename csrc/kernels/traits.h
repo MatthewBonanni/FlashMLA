@@ -10,9 +10,10 @@
 using TMABarrier = cutlass::arch::ClusterTransactionBarrier;
 using namespace cute;
 
-template<typename InputT_>
+template<typename InputT_, typename OutputT_ = InputT_>
 struct Traits {
     using InputT = InputT_;
+    using OutputT = OutputT_;
     
     static constexpr int BLOCK_SIZE_M = Config::BLOCK_SIZE_M;
     static constexpr int PAGE_BLOCK_SIZE = Config::PAGE_BLOCK_SIZE;
@@ -21,7 +22,18 @@ struct Traits {
 
     static constexpr int NUM_THREADS = 256;
 
-    static_assert(std::is_same_v<InputT, cutlass::bfloat16_t> || std::is_same_v<InputT, cutlass::half_t>);
+    static_assert(std::is_same_v<InputT, cutlass::bfloat16_t> ||
+                  std::is_same_v<InputT, cutlass::half_t> ||
+                  std::is_same_v<InputT, cutlass::float_e4m3_t>);
+    static_assert(std::is_same_v<OutputT, cutlass::bfloat16_t> ||
+                  std::is_same_v<OutputT, cutlass::half_t> ||
+                  std::is_same_v<OutputT, cutlass::float_e4m3_t>);
+
+    // FP8 scaling support - only needed when using FP8 types
+    static constexpr bool INPUT_IS_FP8 = std::is_same_v<InputT, cutlass::float_e4m3_t>;
+    static constexpr bool OUTPUT_IS_FP8 = std::is_same_v<OutputT, cutlass::float_e4m3_t>;
+    static constexpr bool NEEDS_INPUT_DESCALING = INPUT_IS_FP8;
+    static constexpr bool NEEDS_OUTPUT_SCALING = OUTPUT_IS_FP8;
 
     using TiledMMA_QK_sQ = decltype(make_tiled_mma(
         GMMA::ss_op_selector<InputT, InputT, float, Shape<Int<BLOCK_SIZE_M>, Int<PAGE_BLOCK_SIZE>, Int<HEAD_DIM_K>>, GMMA::Major::K, GMMA::Major::K>(),
