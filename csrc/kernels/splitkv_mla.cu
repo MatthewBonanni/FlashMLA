@@ -761,7 +761,8 @@ __forceinline__ __device__ void wg0_subroutine(
     int seqlen_k,
     int block_idx,
     int end_block_idx,
-    int idx_in_warpgroup
+    int idx_in_warpgroup,
+    float effective_scale_softmax_log2
 ) {
     int start_token_idx = block_idx * T::PAGE_BLOCK_SIZE;
     #define GET_BLOCK_INDEX(block_idx) ((block_idx) >= end_block_idx ? 0 : __ldg(block_table_ptr + (block_idx)))
@@ -773,7 +774,7 @@ __forceinline__ __device__ void wg0_subroutine(
 
     Tensor rPb = make_tensor<T::InputT>(Shape<Shape<_2, _2, _2>, _1, _4>{});
     // Calc P0 = softmax(P0)
-    wg0_bunch_0<T, IS_BLK0_LAST||IS_BLK1_LAST>(rPb, rP0, rO0, sScale0, sM, rL, rRightBorderForQSeq, params.scale_softmax_log2, start_token_idx, idx_in_warpgroup);
+    wg0_bunch_0<T, IS_BLK0_LAST||IS_BLK1_LAST>(rPb, rP0, rO0, sScale0, sM, rL, rRightBorderForQSeq, effective_scale_softmax_log2, start_token_idx, idx_in_warpgroup);
     NamedBarrier::arrive(T::NUM_THREADS, NamedBarriers::sScale0Ready);
 
     // Issue rO0 += rPb @ sV0L
@@ -873,7 +874,8 @@ __forceinline__ __device__ void wg1_subroutine(
     int seqlen_k,
     int block_idx,
     int end_block_idx,
-    int idx_in_warpgroup
+    int idx_in_warpgroup,
+    float effective_scale_softmax_log2
 ) {
     int start_token_idx = block_idx * T::PAGE_BLOCK_SIZE;
     int nxt_block0_index = GET_BLOCK_INDEX(block_idx+2);
@@ -886,7 +888,7 @@ __forceinline__ __device__ void wg1_subroutine(
 
     // Wait for rP1 and warpgroup 0, run bunch 1, notify warpgroup 0
     NamedBarrier::arrive_and_wait(T::NUM_THREADS, NamedBarriers::sScale0Ready);
-    wg1_bunch_0<T, IS_BLK0_LAST, IS_BLK1_LAST, IS_BLK2_LAST>(rP1b, sScale1, rO1, sM, rL, rRightBorderForQSeq, sScale0, rP1, params.scale_softmax_log2, start_token_idx+T::PAGE_BLOCK_SIZE, idx_in_warpgroup);
+    wg1_bunch_0<T, IS_BLK0_LAST, IS_BLK1_LAST, IS_BLK2_LAST>(rP1b, sScale1, rO1, sM, rL, rRightBorderForQSeq, sScale0, rP1, effective_scale_softmax_log2, start_token_idx+T::PAGE_BLOCK_SIZE, idx_in_warpgroup);
     NamedBarrier::arrive(T::NUM_THREADS, NamedBarriers::sScale1Ready);
 
     // Save rPb to sP, and issue rO1 += rP1b @ sV1R
@@ -1028,6 +1030,14 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
     // Copy the first Q
     launch_q_copy<T>(tma_params, begin_idx, m_block_idx, k_head_idx, sQ, barrier_Q);
 
+    // Compute effective scaling factor that includes FP8 descaling
+    float effective_scale_softmax_log2 = params.scale_softmax_log2;
+    if constexpr (T::INPUT_IS_FP8) {
+        float descale_q = params.descale_q_ptr ? params.descale_q_ptr[k_head_idx] : 1.0f;
+        float descale_k = params.descale_k_ptr ? params.descale_k_ptr[k_head_idx] : 1.0f;
+        effective_scale_softmax_log2 *= descale_q * descale_k;
+    }
+
     #pragma unroll 1
     for (int batch_idx = begin_idx; batch_idx <= end_idx; ++batch_idx) {
         constexpr int kBlockN = T::PAGE_BLOCK_SIZE;
@@ -1131,7 +1141,8 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
                     rQ8, rP0, rO, rL, rRightBorderForQSeq, \
                     barriers_K0, barriers_K1, cur_phase_K0, \
                     tma_params, params, \
-                    block_table_ptr, seqlen_k, block_idx, end_block_idx, idx_in_warpgroup \
+                    block_table_ptr, seqlen_k, block_idx, end_block_idx, idx_in_warpgroup, \
+                    effective_scale_softmax_log2 \
                 );
 
             int block_idx = start_block_idx;
@@ -1162,7 +1173,8 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
                     rQ8, rP1, rO, rL, rRightBorderForQSeq, \
                     barriers_K0, barriers_K1, cur_phase_K1, \
                     tma_params, params, \
-                    block_table_ptr, seqlen_k, block_idx, end_block_idx, idx_in_warpgroup \
+                    block_table_ptr, seqlen_k, block_idx, end_block_idx, idx_in_warpgroup, \
+                    effective_scale_softmax_log2 \
                 );
 
             int block_idx = start_block_idx;
