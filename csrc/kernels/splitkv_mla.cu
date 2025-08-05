@@ -628,7 +628,7 @@ __forceinline__ __device__ void store_o(
         Tensor rOb = make_tensor_like<OutputT>(rO);
         CUTLASS_PRAGMA_UNROLL
         for (int idx = 0; idx < size(rO); ++idx) {
-            rOb(idx) = (InputT)(rO(idx) / rL[idx%4 >= 2]);
+            rOb(idx) = (OutputT)(rO(idx) / rL[idx%4 >= 2]);
         }
 
         Tensor sMyOutputBuf = local_tile(sOutputBuf, Shape<_64, _256>{}, make_coord(_0{}, warpgroup_idx));
