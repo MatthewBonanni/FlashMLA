@@ -621,7 +621,7 @@ __forceinline__ __device__ void store_o(
     if constexpr (IS_NO_SPLIT) {
         // Should convert the output to bfloat16 / float16, and save it to O
         Tensor sOutputBuf = make_tensor(make_smem_ptr((OutputT*)sO_addr), tile_to_shape(
-            GMMA::Layout_K_SW128_Atom<OutputT>{},
+            getSmemLayout<OutputT, T::HEAD_DIM_V, GMMA::Major::K>(),
             Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_V>>{}
         ));
 
@@ -736,21 +736,25 @@ template<
     typename Engine8, typename Layout8,
     typename Engine9, typename Layout9,
     typename Engine10, typename Layout10,
-    typename Engine11, typename Layout11
+    typename Engine11, typename Layout11,
+    typename Engine12, typename Layout12,
+    typename Engine13, typename Layout13
 >
 __forceinline__ __device__ void wg0_subroutine(
     Tensor<Engine0, Layout0> &tma_gK,
     Tensor<Engine1, Layout1> &sQ,
     Tensor<Engine2, Layout2> &sK0,
     Tensor<Engine3, Layout3> &sK1,
-    Tensor<Engine4, Layout4> &sP0,
-    Tensor<Engine5, Layout5> &sP1,
-    Tensor<Engine6, Layout6> &sM,
-    Tensor<Engine7, Layout7> &sScale0,
-    Tensor<Engine8, Layout8> &sScale1,
-    Tensor<Engine9, Layout9> &rQ8,
-    Tensor<Engine10, Layout10> &rP0,
-    Tensor<Engine11, Layout11> &rO0,
+    Tensor<Engine4, Layout4> &sVT0,
+    Tensor<Engine5, Layout5> &sVT1,
+    Tensor<Engine6, Layout6> &sP0,
+    Tensor<Engine7, Layout7> &sP1,
+    Tensor<Engine8, Layout8> &sM,
+    Tensor<Engine9, Layout9> &sScale0,
+    Tensor<Engine10, Layout10> &sScale1,
+    Tensor<Engine11, Layout11> &rQ8,
+    Tensor<Engine12, Layout12> &rP0,
+    Tensor<Engine13, Layout13> &rO0,
     float rL[2],
     int rRightBorderForQSeq[2],
     TMABarrier barriers_K0[9],
@@ -772,6 +776,15 @@ __forceinline__ __device__ void wg0_subroutine(
 
     Tensor sV0L = get_half_V<T, 0>(sK0);
     Tensor sV1L = get_half_V<T, 0>(sK1);
+    Tensor sVT0L = get_half_V<T, 0>(sVT0);
+    Tensor sVT1L = get_half_V<T, 0>(sVT1);
+
+    // Transpose V0L and V1L if necessary
+    if constexpr (T::INPUT_IS_FP8) {
+        typename T::SmemFP8Transpose transpose_op;
+        transpose_op.transpose(sV0L, sVT0L);
+        transpose_op.transpose(sV1L, sVT1L);
+    }
 
     Tensor rPb = make_tensor<T::InputT>(Shape<Shape<_2, _2, _2>, _1, _4>{});
     // Calc P0 = softmax(P0)
@@ -780,10 +793,19 @@ __forceinline__ __device__ void wg0_subroutine(
 
     // Issue rO0 += rPb @ sV0L
     if constexpr (IS_BLK0_LAST) {
-        fill_oob_V<T>(sV0L, seqlen_k-start_token_idx, idx_in_warpgroup);
+        if constexpr (T::INPUT_IS_FP8) {
+            fill_oob_V<T>(sVT0L, seqlen_k-start_token_idx, idx_in_warpgroup);
+        } else {
+            fill_oob_V<T>(sV0L, seqlen_k-start_token_idx, idx_in_warpgroup);
+        }
         cutlass::arch::fence_view_async_shared();
     }
-    warpgroup_cooperative_pv_gemm_localP<T>(rPb, sV0L, rO0, idx_in_warpgroup);
+
+    if constexpr (T::INPUT_IS_FP8) {
+        warpgroup_cooperative_pv_gemm_localP<T>(rPb, sVT0L, rO0, idx_in_warpgroup);
+    } else {
+        warpgroup_cooperative_pv_gemm_localP<T>(rPb, sV0L, rO0, idx_in_warpgroup);
+    }
 
     // Wait for rO0, launch TMA for the next V0L
     cute::warpgroup_wait<0>();
@@ -849,21 +871,25 @@ template<
     typename Engine8, typename Layout8,
     typename Engine9, typename Layout9,
     typename Engine10, typename Layout10,
-    typename Engine11, typename Layout11
+    typename Engine11, typename Layout11,
+    typename Engine12, typename Layout12,
+    typename Engine13, typename Layout13
 >
 __forceinline__ __device__ void wg1_subroutine(
     Tensor<Engine0, Layout0> &tma_gK,
     Tensor<Engine1, Layout1> &sQ,
     Tensor<Engine2, Layout2> &sK0,
     Tensor<Engine3, Layout3> &sK1,
-    Tensor<Engine4, Layout4> &sP0,
-    Tensor<Engine5, Layout5> &sP1,
-    Tensor<Engine6, Layout6> &sM,
-    Tensor<Engine7, Layout7> &sScale0,
-    Tensor<Engine8, Layout8> &sScale1,
-    Tensor<Engine9, Layout9> &rQ8,
-    Tensor<Engine10, Layout10> &rP1,
-    Tensor<Engine11, Layout11> &rO1,
+    Tensor<Engine4, Layout4> &sVT0,
+    Tensor<Engine5, Layout5> &sVT1,
+    Tensor<Engine6, Layout6> &sP0,
+    Tensor<Engine7, Layout7> &sP1,
+    Tensor<Engine8, Layout8> &sM,
+    Tensor<Engine9, Layout9> &sScale0,
+    Tensor<Engine10, Layout10> &sScale1,
+    Tensor<Engine11, Layout11> &rQ8,
+    Tensor<Engine12, Layout12> &rP1,
+    Tensor<Engine13, Layout13> &rO1,
     float rL[2],
     int rRightBorderForQSeq[2],
     TMABarrier barriers_K0[9],
@@ -886,6 +912,8 @@ __forceinline__ __device__ void wg1_subroutine(
     
     Tensor sV0R = get_half_V<T, 1>(sK0);
     Tensor sV1R = get_half_V<T, 1>(sK1);
+    Tensor sVT0R = get_half_V<T, 1>(sVT0);
+    Tensor sVT1R = get_half_V<T, 1>(sVT1);
 
     // Wait for rP1 and warpgroup 0, run bunch 1, notify warpgroup 0
     NamedBarrier::arrive_and_wait(T::NUM_THREADS, NamedBarriers::sScale0Ready);
@@ -982,6 +1010,8 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
     Tensor sQ = make_tensor(make_smem_ptr(plan.smem_sQ.data()), (typename T::SmemLayoutQ){});
     Tensor sK0 = make_tensor(make_smem_ptr(plan.smem_sK0.data()), (typename T::SmemLayoutK){});
     Tensor sK1 = make_tensor(make_smem_ptr(plan.smem_sK1.data()), (typename T::SmemLayoutK){});
+    Tensor sVT0 = make_tensor(make_smem_ptr(plan.smem_sVT0.data()), (typename T::SmemLayoutVT){});
+    Tensor sVT1 = make_tensor(make_smem_ptr(plan.smem_sVT1.data()), (typename T::SmemLayoutVT){});
     Tensor sP0 = make_tensor(make_smem_ptr(plan.smem_sP0.data()), (typename T::SmemLayoutP0){});
     Tensor sP1 = flat_divide(sQ, Shape<Int<T::BLOCK_SIZE_M>, Int<T::PAGE_BLOCK_SIZE>>{})(_, _, _0{}, _8{}); // Overlap with sQ's 8-th tile
     Tensor sM = make_tensor(make_smem_ptr(plan.smem_sM.data()), make_shape(Int<T::BLOCK_SIZE_M>{}));
@@ -1139,7 +1169,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
 
             #define LAUNCH_WG0_SUBROUTINE(IS_BLK0_LAST, IS_BLK1_LAST) \
                 wg0_subroutine<T, IS_BLK0_LAST, IS_BLK1_LAST>( \
-                    tma_gK, sQ, sK0, sK1, sP0, sP1, sM, sScale0, sScale1, \
+                    tma_gK, sQ, sK0, sK1, sVT0, sVT1, sP0, sP1, sM, sScale0, sScale1, \
                     rQ8, rP0, rO, rL, rRightBorderForQSeq, \
                     barriers_K0, barriers_K1, cur_phase_K0, \
                     tma_params, params, \
@@ -1171,7 +1201,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
 
             #define LAUNCH_WG1_SUBROUTINE(IS_BLK0_LAST, IS_BLK1_LAST, IS_BLK2_LAST) \
                 wg1_subroutine<T, IS_BLK0_LAST, IS_BLK1_LAST, IS_BLK2_LAST>( \
-                    tma_gK, sQ, sK0, sK1, sP0, sP1, sM, sScale0, sScale1, \
+                    tma_gK, sQ, sK0, sK1, sVT0, sVT1, sP0, sP1, sM, sScale0, sScale1, \
                     rQ8, rP1, rO, rL, rRightBorderForQSeq, \
                     barriers_K0, barriers_K1, cur_phase_K1, \
                     tma_params, params, \
@@ -1294,7 +1324,7 @@ void run_flash_splitkv_mla_kernel(Flash_fwd_mla_params &params, cudaStream_t str
             )
         ),
         tile_to_shape(
-            GMMA::Layout_K_SW128_Atom<InputT>{},
+            getSmemLayout<InputT, T::HEAD_DIM_K, T::HEAD_DIM_K, GMMA::Major::K>(),
             Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_K>>{}
         )
     );
@@ -1309,7 +1339,7 @@ void run_flash_splitkv_mla_kernel(Flash_fwd_mla_params &params, cudaStream_t str
             )
         ),
         tile_to_shape(
-            GMMA::Layout_K_SW128_Atom<InputT>{},
+            getSmemLayout<InputT, T::HEAD_DIM_K, T::HEAD_DIM_V/2, GMMA::Major::K>(),
             Layout<
                 Shape<Int<T::PAGE_BLOCK_SIZE>, Int<64>>,
                 Stride<Int<T::HEAD_DIM_K>, _1>
